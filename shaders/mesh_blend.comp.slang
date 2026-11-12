@@ -19,27 +19,41 @@ struct Mesh_Blend_Params {
     float noise_scale;
     float min_pixels; // Mesh_Blend_Settings.min_pixels, in pixels of an image MIN_PIXELS_HEIGHT high
     float max_widen;  // at least 1
+    uint values;      // in the buffer of values
+};
+// What the search reads of an entity, by its index (meshblend.Blend_Value).
+struct Blend_Value {
+    float width; // 0: it takes no part
+    uint group;
 };
 [[vk::binding(SLOT_PARAMS, 0)]] ConstantBuffer<Mesh_Blend_Params> params : register(MIRAI_REGISTER(b, SLOT_PARAMS), space0);
 [[vk::binding(SLOT_PASS0, 0)]] Texture2D<float4> linear_depth : register(MIRAI_REGISTER(t, SLOT_PASS0), space0);
 [[vk::binding(SLOT_PASS3, 0)]] Texture2D<uint> instance_ids : register(MIRAI_REGISTER(t, SLOT_PASS3), space0);
 [[vk::binding(SLOT_PASS4, 0)]] [[vk::image_format("rg32ui")]] RWTexture2D<uint2> blended : register(MIRAI_REGISTER(u, SLOT_PASS4), space0);
+[[vk::binding(SLOT_PASS5, 0)]] StructuredBuffer<Blend_Value> values : register(MIRAI_REGISTER(t, SLOT_PASS5), space0);
 
 static const float MIN_PIXELS_HEIGHT = 1080.0;
 
 // A surface of the G-buffer as the blend reads it.
 struct Sample {
     uint id;      // the instance + 1; 0: none
-    float4 data;  // its values: width, group (low and high bits), participates
+    Blend_Value data;
     float depth;  // linear
     float3 position;
 };
 
-// The values of an instance (meshblend.value_of).
-float4 instance_data(uint id) { return id == 0u ? float4(0.0) : instance_values(id - 1u); }
+// The values of the entity an instance is drawn for, by the index of its
+// object id: of the instance, or of the row of its batch.
+Blend_Value instance_data(uint id) {
+    Blend_Value none = {0.0, 0u};
+    if (id == 0u) return none;
+    uint index = id - 1u;
+    uint object = instance_batched(index) ? batch_row(batch_of(index)).meta.z : instances[index].meta.z;
+    return object < params.values ? values[object] : none;
+}
 
-bool participant(uint id, float4 data) { return id != 0u && data.w > 0.5 && data.x > 0.0; }
-bool same_group(float4 a, float4 b) { return all(a.yz == b.yz); }
+bool participant(uint id, Blend_Value data) { return id != 0u && data.width > 0.0; }
+bool same_group(Blend_Value a, Blend_Value b) { return a.group == b.group; }
 
 bool inside(int2 p) { return all(p >= int2(0)) && all(p < int2(frame.resolution)); }
 
@@ -80,7 +94,7 @@ struct Candidate {
     float2 direction;
     float distance;
     uint id;
-    float4 data;
+    Blend_Value data;
 };
 
 struct Side {
@@ -140,9 +154,9 @@ void consider(int2 p, Sample self, float2 direction, float distance, inout Candi
     int2 q = offset_pixel(p, direction * distance);
     uint id = id_drawn(q);
     if (id == 0u || id == self.id) return;
-    float4 data = instance_data(id);
+    Blend_Value data = instance_data(id);
     if (!participant(id, data) || same_group(data, self.data)) return;
-    if (distance > max(projected(seam_width(min(self.data.x, data.x), self.depth), self.depth), 1.0)) return;
+    if (distance > max(projected(seam_width(min(self.data.width, data.width), self.depth), self.depth), 1.0)) return;
     if (!drawn_here_at(q)) return;
     Candidate value;
     value.direction = direction;
@@ -166,23 +180,23 @@ void consider(int2 p, Sample self, float2 direction, float distance, inout Candi
     }
 }
 
-bool group_at(int2 p, float4 group) {
+bool group_at(int2 p, Blend_Value group) {
     uint id = id_drawn(p);
     if (id == 0u) return false;
-    float4 data = instance_data(id);
+    Blend_Value data = instance_data(id);
     return participant(id, data) && same_group(data, group) && drawn_here_at(p);
 }
 
 // The seam along a direction, between lo on the own group and hi on the
 // other: false where the ray crosses something of neither. The samples at
 // the seam check the depth of what it finds.
-bool bisect(int2 p, float2 direction, float4 own, float4 other, inout float lo, inout float hi) {
+bool bisect(int2 p, float2 direction, Blend_Value own, Blend_Value other, inout float lo, inout float hi) {
     for (uint step = 0u; step < 8u; step++) {
         if (hi - lo <= 0.5) break;
         float middle = (lo + hi) * 0.5;
         uint id = id_drawn(offset_pixel(p, direction * middle));
         if (id == 0u) return false;
-        float4 data = instance_data(id);
+        Blend_Value data = instance_data(id);
         if (!participant(id, data)) return false;
         if (same_group(data, other)) hi = middle;
         else if (same_group(data, own)) lo = middle;
@@ -306,7 +320,7 @@ Side side_of(int2 p, Sample self, Candidate candidate, bool refine) {
     result.normal = float3(0.0);
     result.roughness = 0.0;
     if (candidate.id == 0u) return result;
-    float own = min(self.data.x, candidate.data.x);
+    float own = min(self.data.width, candidate.data.width);
     float width = seam_width(own, self.depth);
     float radius = seam_radius(width, self.depth);
     float lo = 0.0, hi = candidate.distance;
@@ -358,7 +372,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     Candidate first, second;
     first.id = second.id = 0u;
     first.distance = second.distance = 1e30;
-    float radius = seam_radius(seam_width(self.data.x, self.depth), self.depth);
+    float radius = seam_radius(seam_width(self.data.width, self.depth), self.depth);
     const float2 close_directions[4] = {float2(1, 0), float2(0, 1), float2(-1, 0), float2(0, -1)};
     for (uint i = 0u; i < 4u; i++) consider(p, self, close_directions[i], 1.0, first, second);
     if (radius > 1.0) {

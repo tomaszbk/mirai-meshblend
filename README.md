@@ -7,7 +7,7 @@ A rock sunk into the ground, a wall standing on a terrain or grass growing out o
 line where they cross.
 
 It extends the renderer through `engine/render` (a compute stage and a pass of the `Surface`
-stage, instance ids and per-instance values); it imports neither `render` nor `rhi`.
+stage, instance ids and a buffer of its own); it imports neither `render` nor `rhi`.
 
 ## Install
 
@@ -49,9 +49,11 @@ and the plugin that owns the batch does not need to know about MeshBlend.
 
 ## How it works
 
-- `mesh_blend_render` gives each instance its values (width, group, whether it takes part) with
-  `instance_values_set`, only when the tables, the hierarchy or the scene of the renderer change;
-  with no participants it asks for no passes.
+- `mesh_blend_render` keeps, for each world, the values (width, group) of the entities the
+  renderer draws an instance or a batch for, by entity index, in a buffer of the world
+  (`pass_buffer`). It computes and sends them only when the tables, the hierarchy, the instances
+  or the batches of the renderer change; with no participants it asks for no passes. The search
+  reads the values of a pixel through the object id of the instance that drew it.
 - `mesh_blend.comp` (compute of the `Surface` stage): every pixel that takes part searches around
   it, up to the projected width, for a surface of another group, with directions and distances
   that vary per pixel and per frame and that TAA averages. It finds the seam by bisection along
@@ -65,8 +67,8 @@ and the plugin that owns the batch does not need to know about MeshBlend.
 
 ### Batches
 
-Batches of instances published through `engine/render` (`batch_set`) take their values with
-`batch_values_set`, without rebuilding the renderer tables.
+Batches of instances published through `engine/render` (`batch_set`) take the values of their
+entity: the search reads the object id of the batch, so nothing is given to the batch itself.
 
 ## Limits
 
@@ -77,7 +79,7 @@ Batches of instances published through `engine/render` (`batch_set`) take their 
 ## Verify
 
 - CPU: in a project with the plugin, `mirai test <project>/plugins/meshblend/runtime`
-  (`the_batches_of_an_entity_under_a_mesh_blend_take_its_width_and_the_group_of_the_entity`).
+  (`an_entity_under_a_mesh_blend_takes_its_width_and_the_group_of_its_author`).
 - In the editor of a project with the plugin, with GPU validation: a sphere sunk into a floor,
   both with `Mesh_Blend`, captured with and without `enabled`: the base of the sphere takes the
   color of the floor and the contact shadow stays. A scene with mirrors and layered materials

@@ -1,26 +1,32 @@
 #include "native.slang"
-// Writes the surfaces mesh_blend.comp blended over the G-buffer: the base
-// color and the normal with its roughness. The alpha of each target stays:
-// the metallic of the surface and the bits of its layers.
+//! variant reflectance MIRAI_MESH_BLEND_REFLECTANCE=1
+// Writes the full PBR blended surface (albedo + metallic, normal + roughness +
+// preserved layer bits, and reflectance when active) into the G-buffer on active tiles.
 #include "common.slang"
+#include "mesh_blend_common.slang"
 
-[[vk::binding(SLOT_PASS0, 0)]] Texture2D<uint2> blended : register(MIRAI_REGISTER(t, SLOT_PASS0), space0);
+[[vk::binding(SLOT_PASS0, 0)]] Texture2D<uint4> surface_in : register(MIRAI_REGISTER(t, SLOT_PASS0), space0);
 
 struct Stage_Output {
     [[vk::location(0)]] float4 out_albedo : SV_Target0;
     [[vk::location(1)]] float4 out_normal : SV_Target1;
+#ifdef MIRAI_MESH_BLEND_REFLECTANCE
+    [[vk::location(2)]] float4 out_reflectance : SV_Target2;
+#endif
 };
-
-float unpack_unorm(uint packed, uint shift, uint bits) { return float((packed >> shift) & ((1u << bits) - 1u)) / float((1u << bits) - 1u); }
 
 [shader("fragment")]
 Stage_Output main(float4 pixel : SV_Position) {
-    uint2 v = blended.Load(int3(int2(pixel.xy), 0));
-    if ((v.x >> 24u) == 0u) discard;
-    float3 coded = float3(unpack_unorm(v.x, 0u, 8u), unpack_unorm(v.x, 8u, 8u), unpack_unorm(v.x, 16u, 8u));
-    float2 oct = float2(unpack_unorm(v.y, 0u, 12u), unpack_unorm(v.y, 12u, 12u)) * 2.0 - 1.0;
+    uint4 v = surface_in.Load(int3(int2(pixel.xy), 0));
+    if ((v.z & 0x80000000u) == 0u) discard;
     Stage_Output output;
-    output.out_albedo = float4(coded * coded, 1.0);
-    output.out_normal = float4(oct, unpack_unorm(v.y, 24u, 8u), 1.0);
+    output.out_albedo = unpack_srgb_rgba8(v.x);
+    float2 oct = float2(unpack_unorm16(v.y, 0u), unpack_unorm16(v.y, 16u)) * 2.0 - 1.0;
+    float roughness = unpack_unorm16(v.z, 0u);
+    uint bits = (v.z >> 16u) & 0x7fffu;
+    output.out_normal = float4(oct, roughness, float(bits));
+#ifdef MIRAI_MESH_BLEND_REFLECTANCE
+    output.out_reflectance = unpack_srgb_rgba8(v.w);
+#endif
     return output;
 }
